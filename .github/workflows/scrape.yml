@@ -1,0 +1,45 @@
+name: scrape
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub delays scheduled runs under load - expect some
+    # jitter and occasional skips. That is acceptable for this use case; do not
+    # try to fight it with a tighter cron.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+# Prevent overlapping runs racing on the state files.
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python3 scrape.py
+      - name: commit
+        run: |
+          git config user.name  "mobility-archive-bot"
+          git config user.email "actions@github.com"
+          git add data state
+          if git diff --staged --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+            # Another run may have landed while we worked; rebase and retry.
+            for i in 1 2 3; do
+              git pull --rebase --autostash && git push && exit 0
+              sleep 5
+            done
+            exit 1
+          fi
+
