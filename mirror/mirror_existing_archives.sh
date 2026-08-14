@@ -11,12 +11,22 @@ mkdir -p "$DEST"
 
 echo "==> 1/2  bike-sharing-history (MIT licensed; git history IS the archive)"
 echo "         Vancouver/Mobi coverage: 2023-08-05 -> 2025-05-21, ~15 min"
-echo "         Full clone - the history is the point, so do NOT shallow-clone."
+echo "         Full repo is ~68GB (100+ systems). We only need one file's"
+echo "         history, so this does a BLOBLESS + SPARSE clone: full commit"
+echo "         history (do NOT shallow-clone, that would lose it), but only"
+echo "         the Vancouver blob content, backfilled locally. ~800MB instead"
+echo "         of 68GB, with identical git-log/git-show results for that path."
 if [ ! -d "$DEST/bike-sharing-history" ]; then
-  git clone https://github.com/MaxHalford/bike-sharing-history.git \
+  git clone --filter=blob:none --no-checkout \
+    https://github.com/MaxHalford/bike-sharing-history.git \
     "$DEST/bike-sharing-history"
+  git -C "$DEST/bike-sharing-history" sparse-checkout init --no-cone
+  git -C "$DEST/bike-sharing-history" sparse-checkout set \
+    data/stations/vancouver/mobi-bike-share.geojson
+  git -C "$DEST/bike-sharing-history" backfill --sparse --min-batch-size=2000
 else
   git -C "$DEST/bike-sharing-history" fetch --all
+  git -C "$DEST/bike-sharing-history" backfill --sparse --min-batch-size=2000
 fi
 
 echo
@@ -37,7 +47,9 @@ while [ "$Y" -lt "$NOW_Y" ] || { [ "$Y" -eq "$NOW_Y" ] && [ "$M" -le "$NOW_M" ];
 done
 
 echo
-echo "Done. Extract just the Vancouver series from the git history with:"
-echo "  cd $DEST/bike-sharing-history"
-echo "  git log --format='%H %aI' -- data/stations/vancouver/mobi-bike-share.geojson"
-echo "  git show <sha>:data/stations/vancouver/mobi-bike-share.geojson"
+echo "Done. Extract just the Vancouver series into a parquet with:"
+echo "  cd ../03_data && source .venv/bin/activate"
+echo "  python3 scripts/extract_vancouver_mirror.py"
+echo "(that script streams every commit blob through one 'git cat-file --batch'"
+echo " process -- doing it one 'git show' per commit is ~2 objects/sec even"
+echo " after backfill, i.e. hours for the full history; batched is seconds)"
