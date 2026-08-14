@@ -132,9 +132,33 @@ def station_records(feeds):
         rec = {k: s.get(k) for k in keep if k in s}
         types = s.get("vehicle_types_available") or s.get("num_bikes_available_types")
         if types:
-            rec["vehicle_types_available"] = types
+            # Mobi returns this list in NONDETERMINISTIC ORDER -- the same
+            # counts come back permuted between polls. Sort on capture so the
+            # stored record is canonical and diffable; without this, 179 of 263
+            # stations looked "changed" on every single poll purely from
+            # reordering. See meaningful_state().
+            rec["vehicle_types_available"] = sorted(
+                types, key=lambda d: str(d.get("vehicle_type_id"))
+            )
         out.append(rec)
     return out, info
+
+
+def meaningful_state(rec):
+    """
+    The part of a station record that represents actual state, for deciding
+    whether anything changed.
+
+    Excludes `last_reported`: it is a heartbeat that advances on every poll
+    whether or not availability moved, so comparing on it marks all 263
+    stations changed every time and turns each "delta" into a full snapshot
+    under a misleading name. Worse, it would tell any downstream analysis of
+    rebalancing or change-frequency that every station changes constantly.
+
+    `last_reported` is still stored for stations that do change -- it just
+    doesn't get a vote on whether they changed.
+    """
+    return {k: v for k, v in rec.items() if k != "last_reported"}
 
 
 def free_floating_records(feeds):
@@ -206,7 +230,8 @@ def run_system(system, now):
             p = write_snapshot(sid, now, "k", payload)
             print(f"[{sid}] keyframe: {len(records)} stations -> {p.name}")
         else:
-            changed = [r for k, r in curr.items() if prev.get(k) != r]
+            changed = [r for k, r in curr.items()
+                       if meaningful_state(prev.get(k, {})) != meaningful_state(r)]
             gone = [k for k in prev if k not in curr]
             if changed or gone:
                 payload = {"ts": now.isoformat(), "type": "delta",

@@ -97,6 +97,23 @@ overlapping runs can't corrupt earlier data.
 Reconstruct any moment by replaying the day's keyframe then applying deltas in
 filename order — `consolidate.py` does this.
 
+**A delta contains only stations whose *meaningful* state changed.** Two feed
+quirks are normalized out before comparing, both found by noticing that "263 of
+263 stations changed" on every single poll:
+
+- `vehicle_types_available` comes back from Mobi in **nondeterministic order** —
+  the same counts, permuted. It is sorted on capture so records are canonical.
+- `last_reported` is a **heartbeat that advances every poll** whether or not
+  availability moved, so it is excluded from the change comparison (though still
+  stored for stations that do change).
+
+Without these, every "delta" was a full snapshot under a misleading name — ~2.7 KB
+instead of ~400 bytes — and, more damagingly, any downstream analysis of
+rebalancing or change frequency would have concluded that every station changes
+constantly. **Consequence to know when reading reconstructed data:**
+`last_reported` reflects that station's last *meaningful* change, not the instant
+of the poll.
+
 ## Monthly consolidation
 
     pip install -r requirements-consolidate.txt
