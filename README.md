@@ -14,8 +14,13 @@ permanently lost for that system.
     python3 scrape.py                 # all systems
     python3 scrape.py mobi-vancouver  # one system
 
-Then push to GitHub. `.github/workflows/scrape.yml` runs every 15 minutes and
-commits results.
+Poll once and exit (the default), or sample on a fixed cadence:
+
+    python3 scrape.py --interval 900 --duration 2400   # poll every 15 min for 30 min
+
+Then push to GitHub. `.github/workflows/scrape.yml` runs it on a schedule and
+commits results — but see **Cadence** below, because the schedule is not what
+sets the sampling rate.
 
 **Make the repo public.** Two reasons: GitHub Actions minutes are unlimited on
 public repos and this schedule would exceed the free private allowance; and a
@@ -31,6 +36,53 @@ commitment — one is git history in a single person's repo, the other is an
 endpoint its maintainers label "experimental." Do this before anything else.
 
 Known permanent gap in the existing archives: **2024-04-12 to 2024-08-22.**
+
+## Cadence — read this before changing the cron
+
+**GitHub's scheduler cannot deliver a 15-minute cadence, and tuning the cron
+will not fix it.** Measured over 10 consecutive runs off a `*/15` schedule, gaps
+between runs were **58, 58, 32, 39, 25, 28, 28, 31, 29 minutes** — a median of
+31 and an effective **44 runs/day against a target of 96**. GitHub throttles
+scheduled workflows heavily and offers no guarantee about delivery.
+
+So the sampling rate is set **inside the job**, not by the scheduler.
+`scrape.py --interval 900 --duration 2400` polls every 15 minutes for 30
+minutes, then the job commits and exits. The schedule's only job is to fire
+often enough that a successor is always queued; `concurrency: cancel-in-progress:
+false` makes runs chain back-to-back rather than overlap.
+
+**Achieved cadence: ~15-minute sampling (≈96 snapshots/day), continuous**, versus
+~44/day before. The schedule still says `*/15`; that is intentional and means
+"start as often as you're willing," not "sample every 15 minutes."
+
+Three constraints shaped this, and they're worth knowing before retuning:
+
+- **Runs are kept short (~32 min), not maximal.** Data is only committed at the
+  end of a run, so a long run leaves the newest *committed* snapshot stale even
+  while scraping is perfectly healthy — which would trip the 90-minute monitor
+  for no reason. Short runs also bound how much is lost if a job is cancelled.
+- **Lime cannot be delta-encoded**, so every Lime poll is a full ~36 KB gzipped
+  file. At 15 min that's ~1.3 GB/year; at 2 min it would be ~9.5 GB/year in a git
+  repo. See the vehicle-ID note below for why faster sampling buys less than it
+  appears to.
+- **Alternatives considered.** Staggering several offset workflow files raises the
+  run count but each run still samples once, so it treats the symptom; the
+  in-process loop decouples cadence from the scheduler entirely and was strictly
+  better. A VPS or self-hosted runner with real cron would give exact timing and
+  remains the right answer if sub-5-minute sampling is ever needed — it costs
+  money and a host, so it wasn't justified for a target the loop already meets.
+
+## Monitoring — `monitor.py`
+
+    python3 monitor.py --max-gap-minutes 90 --window-hours 24
+
+Fails non-zero if any system's newest snapshot is older than the limit, or if any
+gap between consecutive snapshots inside the window exceeds it. Runs hourly via
+`.github/workflows/monitor.yml`; a red run emails the repo owner.
+
+It is a **separate workflow from `scrape` on purpose**: if the scraper stops
+being scheduled or dies, its own steps never execute and therefore can never
+report the problem. The check has to be able to fail while the scraper is silent.
 
 ## Storage model
 
@@ -87,6 +139,25 @@ equity across neighbourhoods.
 GBFS contains none of these. Inferring trips from snapshot differences conflates
 operator rebalancing with real trips and misses anything shorter than the poll
 interval — for free-floating fleets it's especially unreliable. Don't do it.
+
+### Lime rotates vehicle IDs every poll — verified, and it's a hard limit
+
+Measured across consecutive Lime snapshots: **100% of `bike_id` values differ
+every time**, as 36-character UUIDs. Not fleet turnover — a deliberate GBFS
+privacy measure. Two consequences, both load-bearing:
+
+1. **No vehicle can be followed across snapshots**, so trip reconstruction for
+   Lime is not merely unreliable (as above) but *impossible in principle*. What
+   the archive records is the supply-side spatial distribution at each instant.
+   Anyone downstream assuming otherwise will produce nonsense.
+2. **Delta encoding is impossible** — there are no stable keys to diff against —
+   which is why Lime writes full snapshots while Mobi writes deltas, and why
+   Lime dominates the storage budget.
+
+This also tempers the case for very high-frequency sampling: since vehicles
+can't be tracked anyway, faster polling sharpens the picture of *the
+distribution* (rebalancing, demand peaks, how fast a curb empties) rather than
+revealing movement.
 
 For Mobi demand-side questions use the operator's trip files
 (<https://www.mobibikes.ca/en/system-data>, 2017-present, hour-rounded

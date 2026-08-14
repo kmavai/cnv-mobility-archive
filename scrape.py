@@ -23,7 +23,27 @@ Design notes (these encode lessons from how the existing public archive broke):
    A full snapshot at the first poll of each UTC day, deltas thereafter. Cuts
    storage ~10x versus full snapshots while remaining fully reconstructable:
    replay the day's keyframe then apply deltas in filename order.
+
+5. POLL IN A LOOP, NOT ONCE PER INVOCATION.
+   GitHub throttles scheduled workflows hard: a `*/15` cron was observed
+   delivering runs 25-58 minutes apart (~44/day against a target of 96). The
+   sampling rate therefore cannot be driven by the scheduler. Instead each
+   invocation polls every --interval seconds for --duration seconds, so the
+   cadence is set by this process and the scheduler only has to start us often
+   enough to keep one alive. See mobility-archive/README.md.
+
+   NOTE ON FREE-FLOATING SYSTEMS: Lime rotates vehicle IDs (36-char UUIDs) on
+   every poll -- 100% of ids differ between consecutive snapshots. That is a
+   deliberate GBFS privacy measure. Two consequences:
+     - Delta encoding is impossible for these systems; full snapshots are the
+       only option (~36KB gzipped each), which is what bounds how fast we can
+       afford to sample.
+     - Individual vehicles CANNOT be tracked across snapshots, so trips cannot
+       be reconstructed from this archive. It is a record of the supply-side
+       spatial distribution at each instant, nothing more. Do not let anyone
+       downstream assume otherwise.
 """
+import argparse
 import gzip
 import json
 import os
@@ -208,11 +228,9 @@ def run_system(system, now):
     return len(records)
 
 
-def main():
-    cfg = json.loads((ROOT / "systems.json").read_text())
+def poll_once(cfg, only):
+    """One sweep across all systems. Returns the list of system ids that failed."""
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    only = sys.argv[1] if len(sys.argv) > 1 else None
-
     failures = []
     for system in cfg["systems"]:
         if only and system["id"] != only:
@@ -222,13 +240,49 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"[{system['id']}] FAILED: {e}", file=sys.stderr)
             failures.append(system["id"])
+    return failures
 
-    if failures:
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("system", nargs="?", help="only poll this system id")
+    ap.add_argument("--interval", type=int, default=int(os.environ.get("SCRAPE_INTERVAL", 900)),
+                    help="seconds between polls (default 900 = 15 min)")
+    ap.add_argument("--duration", type=int, default=int(os.environ.get("SCRAPE_DURATION", 0)),
+                    help="total seconds to keep polling; 0 = poll once and exit (default)")
+    args = ap.parse_args()
+
+    cfg = json.loads((ROOT / "systems.json").read_text())
+    started = time.monotonic()
+    all_failures, n_polls = [], 0
+
+    while True:
+        n_polls += 1
+        print(f"--- poll {n_polls} "
+              f"(t+{int(time.monotonic() - started)}s of {args.duration}s) ---")
+        all_failures += poll_once(cfg, args.system)
+
+        if args.duration <= 0:
+            break
+        # Stop if another full interval would run past the requested duration.
+        # Sleep in short slices so a cancelled CI job dies promptly.
+        if time.monotonic() - started + args.interval > args.duration:
+            break
+        target = time.monotonic() + args.interval
+        while time.monotonic() < target:
+            time.sleep(min(5, target - time.monotonic()))
+
+    if all_failures:
         # Non-zero exit so the scheduler raises this instead of silently
-        # continuing for the systems that still work.
-        print(f"\nFAILED SYSTEMS: {', '.join(failures)}", file=sys.stderr)
+        # continuing for the systems that still work. Note this fires only at
+        # the END of a long run -- freshness is monitored separately by
+        # monitor.py, which is what catches a stalled scraper promptly.
+        uniq = sorted(set(all_failures))
+        print(f"\nFAILED SYSTEMS: {', '.join(uniq)} "
+              f"({len(all_failures)} failures across {n_polls} polls)", file=sys.stderr)
         sys.exit(1)
-    print("\nok")
+    print(f"\nok ({n_polls} polls)")
 
 
 if __name__ == "__main__":

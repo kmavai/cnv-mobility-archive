@@ -1,0 +1,31 @@
+name: monitor
+
+# Independent freshness check. Deliberately a SEPARATE workflow from scrape:
+# if the scraper stops being scheduled, stalls, or dies, its own steps never
+# run and so can never report the problem. This one has to be able to fail
+# while the scraper is silent -- that is the entire point.
+#
+# A red run emails the repo owner, which is the "fail loudly" mechanism.
+
+on:
+  schedule:
+    - cron: "17 * * * *"   # hourly, offset off the hour to dodge peak throttling
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: check archive freshness
+        # 90 min: comfortably above the intended 15-min cadence and above the
+        # worst observed scheduler delay (58 min), so this fires on genuine
+        # breakage rather than on normal throttling jitter.
+        run: python3 monitor.py --max-gap-minutes 90 --window-hours 24

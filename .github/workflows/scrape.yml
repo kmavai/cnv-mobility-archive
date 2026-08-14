@@ -2,13 +2,28 @@ name: scrape
 
 on:
   schedule:
-    # Every 15 minutes. GitHub delays scheduled runs under load - expect some
-    # jitter and occasional skips. That is acceptable for this use case; do not
-    # try to fight it with a tighter cron.
+    # Fires as often as GitHub allows. DO NOT tune this expecting it to set the
+    # sampling rate -- it doesn't. GitHub throttles scheduled workflows hard
+    # (measured: 25-58 min between runs off a */15 cron, ~44 runs/day against a
+    # target of 96). The sampling cadence is set INSIDE the job by scrape.py's
+    # --interval/--duration loop; the schedule only has to fire often enough to
+    # keep one long-running job alive. See README.md.
     - cron: "*/15 * * * *"
   workflow_dispatch:
+    inputs:
+      interval:
+        description: "seconds between polls"
+        required: false
+        default: "900"
+      duration:
+        description: "total seconds to keep polling"
+        required: false
+        default: "2400"
 
-# Prevent overlapping runs racing on the state files.
+# One scraper at a time. A newly-scheduled run waits for the current one to
+# finish rather than cancelling it, so runs chain back-to-back and coverage is
+# continuous. (GitHub keeps at most one pending run per group; surplus pending
+# runs are dropped, which is what we want -- we only ever need one successor.)
 concurrency:
   group: scrape
   cancel-in-progress: false
@@ -19,14 +34,42 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    # Must exceed SCRAPE_DURATION with room for checkout, install and commit.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python3 scrape.py
+
+      - name: scrape
+        env:
+          # 15 min spacing, stopping before 2400s => polls at t=0/15/30 min,
+          # so each run samples for 30 min then commits. With runs chaining
+          # back-to-back this yields continuous ~15-minute sampling (96/day),
+          # the original design target.
+          #
+          # Duration is deliberately SHORT rather than maximal: the archive is
+          # only committed at the end of a run, so a long run means the newest
+          # *committed* snapshot is old even while scraping is healthy, which
+          # would false-positive the 90-minute monitor. ~32 min per run keeps
+          # committed data fresh and limits how much is lost if a job is
+          # cancelled mid-run.
+          #
+          # Why not faster: Lime rotates vehicle IDs every poll, so its
+          # snapshots cannot be delta-encoded -- every one is a full ~36KB
+          # gzipped file. At 15 min that is ~1.3 GB/year; at 2 min it would be
+          # ~9.5 GB/year in a git repo, for data that cannot track individual
+          # vehicles anyway. See scrape.py design note 5.
+          SCRAPE_INTERVAL: ${{ github.event.inputs.interval || '900' }}
+          SCRAPE_DURATION: ${{ github.event.inputs.duration || '3000' }}
+        run: python3 scrape.py
+
       - name: commit
+        # Runs even if scraping failed partway, so partial data is preserved
+        # rather than discarded along with the failure.
+        if: always()
         run: |
           git config user.name  "mobility-archive-bot"
           git config user.email "actions@github.com"
@@ -42,4 +85,3 @@ jobs:
             done
             exit 1
           fi
-
