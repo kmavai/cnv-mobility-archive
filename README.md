@@ -16,7 +16,7 @@ permanently lost for that system.
 
 Poll once and exit (the default), or sample on a fixed cadence:
 
-    python3 scrape.py --interval 900 --duration 2400   # poll every 15 min for 30 min
+    python3 scrape.py --interval 900 --duration 3300   # poll every 15 min for 45 min
 
 Then push to GitHub. `.github/workflows/scrape.yml` runs it on a schedule and
 commits results — but see **Cadence** below, because the schedule is not what
@@ -46,7 +46,7 @@ between runs were **58, 58, 32, 39, 25, 28, 28, 31, 29 minutes** — a median of
 scheduled workflows heavily and offers no guarantee about delivery.
 
 So the sampling rate is set **inside the job**, not by the scheduler.
-`scrape.py --interval 900 --duration 2400` polls every 15 minutes for 30
+`scrape.py --interval 900 --duration 3300` polls every 15 minutes for 45
 minutes, then the job commits and exits. The schedule's only job is to fire
 often enough that a successor is always queued; `concurrency: cancel-in-progress:
 false` makes runs chain back-to-back rather than overlap.
@@ -71,10 +71,11 @@ a few percent of coverage and has not been done.
 
 Three constraints shaped this, and they're worth knowing before retuning:
 
-- **Runs are kept short (~32 min), not maximal.** Data is only committed at the
+- **Runs are bounded (~45 min), not maximal.** Data is only committed at the
   end of a run, so a long run leaves the newest *committed* snapshot stale even
   while scraping is perfectly healthy — which would trip the 90-minute monitor
-  for no reason. Short runs also bound how much is lost if a job is cancelled.
+  for no reason. At 45 min the worst committed-staleness is ~63 min, leaving
+  margin. Bounded runs also limit how much is lost if a job is cancelled.
 - **Lime cannot be delta-encoded**, so every Lime poll is a full ~36 KB gzipped
   file. At 15 min that's ~1.3 GB/year; at 2 min it would be ~9.5 GB/year in a git
   repo. See the vehicle-ID note below for why faster sampling buys less than it
