@@ -18,7 +18,7 @@ on:
       duration:
         description: "total seconds to keep polling"
         required: false
-        default: "2400"
+        default: "3300"
 
 # One scraper at a time. A newly-scheduled run waits for the current one to
 # finish rather than cancelling it, so runs chain back-to-back and coverage is
@@ -35,7 +35,7 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     # Must exceed SCRAPE_DURATION with room for checkout, install and commit.
-    timeout-minutes: 50
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,16 +45,23 @@ jobs:
 
       - name: scrape
         env:
-          # 15 min spacing, stopping before 2400s => polls at t=0/15/30 min,
-          # so each run samples for 30 min then commits. With runs chaining
-          # back-to-back this yields continuous ~15-minute sampling (96/day),
-          # the original design target.
+          # 15 min spacing, stopping before 3300s => polls at t=0/15/30/45,
+          # so each run samples for 45 min then commits.
           #
-          # Duration is deliberately SHORT rather than maximal: the archive is
-          # only committed at the end of a run, so a long run means the newest
-          # *committed* snapshot is old even while scraping is healthy, which
-          # would false-positive the 90-minute monitor. ~32 min per run keeps
-          # committed data fresh and limits how much is lost if a job is
+          # MEASURED, not assumed: with duration=2400 (3 polls, ~32 min of
+          # runtime) the gap histogram was 21 gaps of exactly 15 min and 7 of
+          # 46 min -- in-run polling is precise, but ~16 min of DEAD TIME sits
+          # between one run ending and GitHub starting the next. That capped
+          # the real rate at 66/day, not the 96 first claimed. Lengthening the
+          # run raises the duty cycle (45 min active vs ~16 dead => ~91/day)
+          # without touching the sampling interval.
+          #
+          # Still bounded, not maximal: data is only committed at the END of a
+          # run, so the newest COMMITTED snapshot ages while a run is in
+          # flight. At 45 min of polling the worst committed-staleness is
+          # ~63 min (45 polling + ~2 commit + ~16 dead), which keeps margin
+          # under the monitor's 90-minute threshold. Going much longer would
+          # start false-positiving the monitor and lose more if a job is
           # cancelled mid-run.
           #
           # Why not faster: Lime rotates vehicle IDs every poll, so its

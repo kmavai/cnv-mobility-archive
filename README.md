@@ -51,9 +51,23 @@ minutes, then the job commits and exits. The schedule's only job is to fire
 often enough that a successor is always queued; `concurrency: cancel-in-progress:
 false` makes runs chain back-to-back rather than overlap.
 
-**Achieved cadence: ~15-minute sampling (≈96 snapshots/day), continuous**, versus
-~44/day before. The schedule still says `*/15`; that is intentional and means
-"start as often as you're willing," not "sample every 15 minutes."
+**Achieved cadence, measured over 10.6 h of steady-state operation: ~91
+snapshots/day**, versus ~44/day before. The schedule still says `*/15`; that is
+intentional and means "start as often as you're willing," not "sample every 15
+minutes."
+
+The gap histogram is the thing to look at, because it separates two different
+behaviours. At `duration=2400` it read **21 gaps of exactly 15 min and 7 of
+46 min**: in-run polling is precise to the second, but ~16 minutes of **dead
+time** sits between one run finishing and GitHub starting the next, and that
+dead time — not the sampling interval — is what caps the rate. It held the real
+figure at **66/day**, well short of the 96 first claimed here.
+
+Raising `duration` to 3300 (4 polls, ~45 min of runtime) lifts the duty cycle
+from ~65% to ~74% and the rate to **~91/day**, without touching the interval.
+Closing the last gap entirely would need overlapping runs — safe in principle,
+since files are immutable and timestamped, but it trades commit contention for
+a few percent of coverage and has not been done.
 
 Three constraints shaped this, and they're worth knowing before retuning:
 
